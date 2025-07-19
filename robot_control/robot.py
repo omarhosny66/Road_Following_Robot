@@ -1,104 +1,76 @@
 from utils import *
 from coppeliasim_zmqremoteapi_client import RemoteAPIClient
+from constants import *
 
 class Robot:
 
     def __init__(self, name, simHandle):
+        # Instance private variables
         self.__name = name
         self.__simHandle = simHandle
         self.__leftMotor = simHandle.getObject(name + "/leftMotor")
         self.__rightMotor = simHandle.getObject(name + "/rightMotor")
         self.__visionSensor = simHandle.getObject(name + "/Vision_sensor")
-        self.__lock = False
-        self.__dir = 0
+        self.__error_prev = 0.0
+        self.__integral = 0.0
+        self.__integral_reset = 0
 
     @property
     def name(self):
         return self.__name
 
-    def getSegmentsMean(self):
-        img, [resX, resY] = getImage(self.__simHandle, self.__visionSensor)
-        img = formatImage(img, resX, resY)
-        leftSeg, rightSeg = imageSeg(img, 20, resY, resX, resY)
-        lSegMean = imageColorMean(leftSeg)
-        rSegMean = imageColorMean(rightSeg)
-        return lSegMean, rSegMean
-
-    def computeWheelsFactor(self, velocity):
-        l, r = self.getSegmentsMean()
-        print("\n l: " + str(l))
-        print("\n r: " + str(r))
-        print("\n lock: " +str(self.__lock))
-        # Todo: Add wait time
-        if (int(l*100) > int(r*100)):
-            self.__dir = 2
-            self.__lock = True
-        elif (int(l*100) < int(r*100)):
-            self.__dir = 3
-            self.__lock = True
-        elif ((r == 0) and (l == 0)):
-            self.__dir = 1
-            self.__lock = False
-        dir = self.__dir
-        return dir
-        # l, r = self.getSegmentsMean()
-        # # Check if any segment contains color other than black
-        # if (l or r):
-        #     # Calculate difference factor
-        #     lF = 1 - ((l - r)/(l + r))
-        #     rF = 1 - ((r - l)/(r + l))
-        #     # Normalize difference factor
-        #     lN = lF/(lF+rF)
-        #     rN = rF/(lF+rF)
-        #     if (lN > rN): 
-        #         lN = 1.2
-        #         rN = 0.1 * rN
-        #     else: 
-        #         rN = 1.2
-        #         lN = 0.1 * lN
-        # else:
-        #     lN = 1
-        #     rN = 1
-        # return lN, rN
-
-    def moveForward(self, velocity):
-        self.__simHandle.setJointTargetVelocity(self.__leftMotor, velocity)
-        self.__simHandle.setJointTargetVelocity(self.__rightMotor, velocity)
-
-    def moveBackward(self, velocity):
-        self.__simHandle.setJointTargetVelocity(self.__leftMotor, velocity)
-        self.__simHandle.setJointTargetVelocity(self.__rightMotor, velocity)
-
-    def steerLeft(self, velocity):
-        self.__simHandle.setJointTargetVelocity(self.__leftMotor, 0)
-        self.__simHandle.setJointTargetVelocity(self.__rightMotor, velocity * 130)
-
-    def steerRight(self, velocity):
-        self.__simHandle.setJointTargetVelocity(self.__leftMotor, velocity * 130)
-        self.__simHandle.setJointTargetVelocity(self.__rightMotor, 0)
-
-    def move(self, velocity, leftWheelF, rightWheelF):
-        self.__simHandle.setJointTargetVelocity(self.__leftMotor, velocity * leftWheelF)
-        self.__simHandle.setJointTargetVelocity(self.__rightMotor, velocity * rightWheelF)
-    
-    def start(self, velocity):
-        # # Compute left and right wheel factors
-        # lWF , rWF = self.computeWheelsFactor()
-        # # Call move function feeding updated factors
-        # self.move(velocity, lWF, rWF)
-        d = self.computeWheelsFactor(velocity)
-        if (d == 1):
-            print("\ndir: " + str(d))
-            self.moveForward(velocity)
-        elif (d == 2):
-            print("\ndir: " + str(d))
-            self.steerRight(velocity)
-        elif (d == 3):
-            print("\ndir: " + str(d))
-            self.steerLeft(velocity)
+    def getDiffFactor(self, desCentroid, actCentroid):
+        # Calculate the error in X direction
+        error = desCentroid - actCentroid
+        # Update intergral and derivative elements
+        self.__integral = self.__integral + error
+        derivative = error - self.__error_prev
+        # Compute pid controller output
+        pidOutput = KP * error + KI * self.__integral + KD * derivative
+        print("PID: ", pidOutput)
+        # Store previous error
+        self.__error_prev = error
+        print("Error: ", error)
+        # Reset integral error for windup
+        if (self.__integral_reset < 10): 
+            self.__integral_reset += 1
         else:
-            self.stop()
+            self.__integral_reset = 0
+            self.__integral = 0.0
         
+        # return the differential factor
+        diffFactor = (pidOutput)
+        return diffFactor
+
+    def move(self, velocity, diffFactorX):
+        # Calculate left motor velocity
+        lMV = velocity + (diffFactorX)
+        # Calcualte right motor velocity
+        rMV = velocity - (diffFactorX)
+        # Debugging: printing motors' velocities
+        print("leftV: ", lMV)
+        print("rightV: ", rMV)
+        # Feeding the updated velocities to motors
+        self.__simHandle.setJointTargetVelocity(self.__leftMotor, lMV)
+        self.__simHandle.setJointTargetVelocity(self.__rightMotor, rMV)
+
+    def update(self, velocity = DEF_VEL, showImg = False):
+        # Update robot image
+        rawImage, [resX, resY] = getRawImage(self.__simHandle, self.__visionSensor, RES_X, RES_Y)
+        # Get desired centroid according to configured resolution
+        dCent = resX/2
+        # Update threshhold
+        thresh, image = getThresh(rawImage, RES_X, RES_Y)
+        # Update actual centroid
+        aCentX, aCentY = getCentroid(thresh, dCent)
+        # Update differential factor
+        dFX = self.getDiffFactor(dCent, aCentX)
+        # Update the robot motors' velocity
+        self.move(velocity, dFX)
+        # Check the parameter showImage and stream the vision sensor accordingly
+        if (showImg): 
+            showImage((self.__name + "/Image"), image)       
+
 
     def stop(self):
         self.__simHandle.setJointTargetVelocity(self.__leftMotor, 0)
